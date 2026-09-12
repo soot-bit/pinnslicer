@@ -4,11 +4,17 @@ version = "0.1.0"
 description = "PINN-Slicer: physics-informed neural network for black-hole photon orbits"
 readme = "README.md"
 requires-python = ">=3.12"
+# Version floors are set to what the code actually needs, not to whatever was
+# current on the day. Pinning them higher makes the project uninstallable on
+# platforms whose wheels lag behind -- notably macOS on Intel (x86_64), where
+# PyPI's newest torch wheel is 2.2.2, because PyTorch stopped building macOS
+# x86 wheels after that. conda-forge still ships newer ones (2.6 at the time
+# of writing), and a floor of 2.2 accepts either.
 dependencies = [
-    "matplotlib>=3.10.7",
-    "numpy>=2.3.4",
-    "scipy>=1.16.2",
-    "torch>=2.9.0",
+    "matplotlib>=3.7",   # only long-standing pyplot/ticker/lines APIs are used
+    "numpy>=1.26",       # works on both numpy 1.x and 2.x
+    "scipy>=1.10",       # qmc.Sobol(seed=...), qmc.scale
+    "torch>=2.2",        # tensor_split (1.8), use_deterministic_algorithms (1.11)
     "pyyaml>=6.0",
 ]
 

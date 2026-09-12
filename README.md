@@ -167,6 +167,33 @@ python -c "from pinnslicer import nn"
 
 ```
 
+### Installing with conda
+
+On macOS with an Intel CPU (`uname -m` reports `x86_64`), PyPI has no torch
+wheel newer than 2.2.2 — PyTorch stopped building macOS x86 wheels after that
+version. conda-forge does still build them, so install torch with conda first
+and let pip install the rest:
+
+```
+
+conda create -n slicer python=3.12
+conda activate slicer
+conda install -c conda-forge pytorch numpy
+pip install -e .
+
+```
+
+The dependency floors in `pyproject.toml` are deliberately loose, so pip
+accepts the torch that conda already installed instead of trying to fetch a
+newer one that does not exist for this platform. To install the notebook
+extras as well:
+
+```
+
+pip install -e ".[notebooks]"
+
+```
+
 ## Google Colab installation `pinnslicer`
   1. Assign Colab working folder to string `COLAB_FOLDER` in notebook.
   2. Execute the code below in a notebook cell before your imports (see, for example, `01_pinn_training.ipynb`).
