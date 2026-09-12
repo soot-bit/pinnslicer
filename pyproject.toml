@@ -3,24 +3,23 @@ name = "pinnslicer"
 version = "0.1.0"
 description = "PINN-Slicer: physics-informed neural network for black-hole photon orbits"
 readme = "README.md"
-requires-python = ">=3.12"
-# Version floors are set to what the code actually needs, not to whatever was
-# current on the day. Pinning them higher makes the project uninstallable on
-# platforms whose wheels lag behind -- notably macOS on Intel (x86_64), where
-# PyPI's newest torch wheel is 2.2.2, because PyTorch stopped building macOS
-# x86 wheels after that. conda-forge still ships newer ones (2.6 at the time
-# of writing), and a floor of 2.2 accepts either.
+requires-python = ">=3.11"
+
 dependencies = [
-    "matplotlib>=3.7",   # only long-standing pyplot/ticker/lines APIs are used
-    "numpy>=1.26",       # works on both numpy 1.x and 2.x
-    "scipy>=1.10",       # qmc.Sobol(seed=...), qmc.scale
-    "torch>=2.2",        # tensor_split (1.8), use_deterministic_algorithms (1.11)
+    "matplotlib>=3.7",
+    "numpy>=1.26",
+    "scipy>=1.10",
+    "torch>=2.2",
     "pyyaml>=6.0",
 ]
 
+# Local Jupyter setup only. Colab already provides ipython/ipykernel, so
+# install with plain `pip install -e .` there and `pip install -e ".[notebooks]"`
+# on a local machine.
 [project.optional-dependencies]
 notebooks = [
     "ipython>=8.0",
+    "ipykernel>=6.0",
 ]
 
 [build-system]
