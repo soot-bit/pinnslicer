@@ -71,6 +71,73 @@ The ODE is autonomous: it does not depend on $\phi$ explicitly, so the coordinat
 [3] Aditi S. Krishnapriyan, Amir Gholami, Shandian Zhe, Robert M. Kirby, Michael W. Mahoney, *Characterizing possible failure modes in physics-informed neural networks*, NIPS'21: Proceedings of the 35th International Conference on Neural Information Processing Systems; [arXiv:2109.01050](https://arxiv.org/abs/2109.01050)  
 [4] D. Mortari, *The Theory of Connections: Connecting Points*, Mathematics, vol. 5, no. 57, 2017.
 
+## Package layout
+
+```
+pinnslicer/
+    nn.py                  FCNN, the ToC Solution, the Objective (loss),
+                           train_pinn, Config, save_checkpoint/load_checkpoint
+    orbits/
+        orbit_setup.py     boomerang orbit parameters, (r0, delta) -> (u0, v0)
+        solvers.py         FDPhotonOrbitSolver, PinnSlicer, OrbitSolution,
+                           SolverStatus
+        plotting.py        OrbitPlotXY, OrbitPlotUPhi, figure builders, palette
+    utils/
+        data.py            Sobol/uniform sampling, Dataset, DataLoader
+        loss_vs_dphi.py    minimum validation loss vs slice width
+        monitoring.py      live cost curves during training
+        seeding.py         set_seed: one call seeds python, numpy and torch
+```
+
+### Solving an orbit
+
+Both solvers are callables with the same signature, and both return an
+`OrbitSolution`:
+
+```python
+import numpy as np
+import pinnslicer.nn as mlp
+from pinnslicer.orbits.solvers import FDPhotonOrbitSolver, PinnSlicer
+
+phi = np.linspace(0, 5*np.pi/2, 400)      # where the solution is wanted
+y0  = (0.2, 0.34)                         # (u0, v0)
+
+# finite-difference reference
+fd = FDPhotonOrbitSolver()(y0, phi)
+
+# PINN trained on the slice [0, dphi], deployed recursively
+pinn  = mlp.load_checkpoint(mlp.Solution(mlp.FCNN()), 'runs/dphi010/dphi010_params.pth')
+sol   = PinnSlicer(pinn, dphi=0.1)(y0, phi)
+
+sol.phi, sol.u, sol.v     # the orbit; phi is trimmed to what was computed
+sol.status                # why the loop stopped: COMPLETED, ESCAPED,
+                          # ABSORBED, MAX_STEPS or PHI_GUARD
+sol.n_iterations          # FD steps, or phi-segments the recursion visited
+sol.complete              # True if the requested phi range was reached
+```
+
+`PinnSlicer` requires the points in `phi` to be spaced no more widely than
+`dphi`: a coarser grid leaves whole segments with no requested point, which
+the recursion would skip silently. It warns when that happens, and raises
+instead if constructed with `strict=True`.
+
+### Reproducibility
+
+`set_seed` seeds python, numpy and torch in one call. The Sobol scrambler
+keeps its own generator and is seeded where the sample is drawn:
+
+```python
+from pinnslicer.utils.seeding import set_seed
+from pinnslicer.utils.data import SobolSample
+
+set_seed(1234)
+sample = SobolSample(lower, upper, num_points_exp=16, seed=1234)
+```
+
+Notebook `01_pinn_training.ipynb` records both the seed and the network
+architecture in the run's yaml configuration, so a run can be repeated and its
+weights reloaded into a network of the right shape.
+
 ## Getting Started
 
 Clone the repository:

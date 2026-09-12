@@ -5,6 +5,8 @@ from scipy.stats import qmc
 import torch
 import torch.utils.data as dt
 import numpy as np
+
+from pinnslicer.utils.seeding import torch_generator
 # ----------------------------------------------------------------------------
 def ensure_dir_exists(filepath):
     """
@@ -28,6 +30,10 @@ class SobolSample:
         lower_bounds (array-like): Lower bounds for each dimension.
         upper_bounds (array-like): Upper bounds for each dimension.
         num_points_exp (int): Number of points is 2 ** num_points_exp.
+        seed (int, optional): Seed of the Sobol scrambler. The scrambler does
+            not read the global numpy seed -- without a seed here the training
+            points differ from run to run -- so pass one to make a run
+            reproducible.
         verbose (int): If nonzero, prints sample information.
 
     Attributes:
@@ -40,21 +46,23 @@ class SobolSample:
         lower_bounds,
         upper_bounds,
         num_points_exp=16,  # of points = 2^num_points_exp
+        seed=None,
         verbose=1,
     ):
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
+        self.seed = seed
 
         # Generate Sobol points in the unit D-cube and scale to bounds
         D = len(lower_bounds)
-        sampler = qmc.Sobol(d=D, scramble=True)
+        sampler = qmc.Sobol(d=D, scramble=True, seed=seed)
         self.sample = sampler.random_base2(m=num_points_exp)
         self.sample = qmc.scale(self.sample, lower_bounds, upper_bounds)
         self.sample = self.sample.astype(np.float32)
 
         if verbose:
             print(f"  SobolSample")
-            print(f"  {2**num_points_exp} Sobol points created.")
+            print(f"  {2**num_points_exp} Sobol points created (seed: {seed}).")
 
     def __len__(self):
         return len(self.sample)
@@ -73,6 +81,9 @@ class UniformSample:
         lower_bounds (array-like): Lower bounds for each dimension.
         upper_bounds (array-like): Upper bounds for each dimension.
         num_points (int): Total number of points to generate.
+        seed (int, optional): If given, the points are drawn from a generator
+            seeded with it, leaving the global numpy generator alone.
+            If None, the global numpy generator is used.
         verbose (int): If nonzero, prints sample information.
 
     Attributes:
@@ -80,16 +91,21 @@ class UniformSample:
             containing points in the bounded domain.
     """
 
-    def __init__(self, lower_bounds, upper_bounds, num_points, verbose=1):
+    def __init__(self, lower_bounds, upper_bounds, num_points, seed=None,
+                 verbose=1):
+        self.seed = seed
+
         # Generate points in the unit D-cube and scale to bounds
         D = len(lower_bounds)
-        self.sample = np.random.uniform(0, 1, D * num_points).reshape((num_points, D))
+        rng = np.random.default_rng(seed) if seed is not None else np.random
+        self.sample = rng.uniform(0, 1, D * num_points).reshape((num_points, D))
         self.sample = qmc.scale(self.sample, lower_bounds, upper_bounds)
         self.sample = self.sample.astype(np.float32)
 
         if verbose:
             print(f"  UniformSample")
-            print(f"  {num_points} uniformly sampled points created.")
+            print(f"  {num_points} uniformly sampled points created "
+                  f"(seed: {seed}).")
 
     def __len__(self):
         return len(self.sample)
@@ -112,7 +128,10 @@ class Dataset(dt.Dataset):
     start, end : int
         Index range for slicing `.sample`.
     random_sample_size : int, optional
-        If set, draws this many random samples from the [start, end) range.
+        If set, draws this many samples, without replacement, from the
+        [start, end) range.
+    seed : int, optional
+        Seed of the subsampling draw; see `random_sample_size`.
     device : torch.device
         Device to store tensors (default CPU).
     dtype : torch.dtype (default torch.float32)
@@ -129,6 +148,7 @@ class Dataset(dt.Dataset):
         start,
         end,
         random_sample_size=None,
+        seed=None,
         device=torch.device("cpu"),
         dtype=torch.float32,
         verbose=1,
@@ -146,14 +166,42 @@ class Dataset(dt.Dataset):
                 "(like SobolSample or UniformSample)."
             )
 
-        if random_sample_size == None:
+        if random_sample_size is None:
             tdata = torch.tensor(data[start:end], dtype=dtype)
         else:
-            # Create a random sample from items in the specified range (start, end)
-            assert isinstance(random_sample_size, int)
+            # Create a random sample from items in the specified range (start, end).
+            # Note: these checks validate user-supplied arguments, so they
+            # raise rather than assert; assert statements are removed
+            # altogether by python -O. isinstance(True, int) is True in
+            # Python, hence the explicit bool rejection.
+            if isinstance(random_sample_size, bool) or not isinstance(
+                random_sample_size, int
+            ):
+                raise TypeError(
+                    f"/!\\ random_sample_size must be an int, got "
+                    f"{type(random_sample_size).__name__}"
+                )
+
             length = end - start
-            assert length > 0
-            indices = torch.randint(start, end - 1, size=(random_sample_size,))
+            if length <= 0:
+                raise ValueError(
+                    f"/!\\ empty range: start = {start}, end = {end}"
+                )
+
+            if random_sample_size > length:
+                raise ValueError(
+                    f"/!\\ cannot draw {random_sample_size} points without "
+                    f"replacement from a range of {length}"
+                )
+
+            # Without replacement, so that the subset has the same statistics
+            # as the equally sized validation set it is compared against.
+            # (torch.randint samples with replacement, and its `high` is
+            # exclusive, so `end - 1` could never draw the last two points.)
+            generator = torch_generator(seed)
+            indices = start + torch.randperm(length, generator=generator)[
+                :random_sample_size
+            ]
             tdata = torch.tensor(data[indices], dtype=dtype)
 
         self.phi_vals = tdata[:, 0].reshape(-1, 1).requires_grad_().to(device)
@@ -203,7 +251,8 @@ class DataLoader:
                  num_iterations=None,
                  verbose=1,
                  debug=0,
-                 shuffle=False):
+                 shuffle=False,
+                 seed=None):
 
         self.dataset = dataset
         self.batch_size = batch_size
@@ -211,12 +260,18 @@ class DataLoader:
         self.verbose = verbose
         self.debug   = debug
         self.shuffle = shuffle
+        self.seed    = seed
+
+        # Local generator for the reshuffles, so that the sequence of batches
+        # is reproducible on its own; None falls back to the global torch
+        # generator (see utils.seeding.set_seed).
+        self.generator = torch_generator(seed)
 
         self.size = len(dataset)
 
         # need batch_size
         if self.batch_size is None:
-            raise ValueError("you must specify a batch_size!")
+            raise ValueError("/!\\ you must specify a batch_size!")
 
         # if shuffle, then shuffle the dataset every shuffle_step iterations
         self.shuffle_step = max(1, self.size // self.batch_size)
@@ -228,9 +283,23 @@ class DataLoader:
             if self.verbose:
                 print('  Number of iterations has been specified')
 
-            # the user has specified the number of iterations
-            assert(type(self.num_iterations)==type(0))
-            assert(self.num_iterations > 0)
+            # the user has specified the number of iterations.
+            # Note: these validate a user-supplied argument, so they raise.
+            # assert(...) with parentheses is worse than useless: it asserts a
+            # non-empty tuple, which is always true.
+            if isinstance(self.num_iterations, bool) or not isinstance(
+                self.num_iterations, int
+            ):
+                raise TypeError(
+                    f"/!\\ num_iterations must be an int, got "
+                    f"{type(self.num_iterations).__name__}"
+                )
+
+            if self.num_iterations <= 0:
+                raise ValueError(
+                    f"/!\\ num_iterations must be positive, got "
+                    f"{self.num_iterations}"
+                )
 
             self.maxiter = self.num_iterations
 
@@ -251,7 +320,8 @@ class DataLoader:
             print(f'  shuffle_step: {self.shuffle_step:10d}')
             print()
 
-        assert(self.maxiter > 0)
+        if self.maxiter <= 0:
+            raise ValueError(f"/!\\ maxiter must be positive, got {self.maxiter}")
 
         # initialize iteration number
         self.itnum = 0
@@ -283,7 +353,9 @@ class DataLoader:
                 # sequence of indices
                 jtnum = self.itnum % self.shuffle_step
                 if self.itnum > 0 and jtnum == 0:
-                    self.indices = torch.randperm(self.size)
+                    self.indices = torch.randperm(
+                        self.size, generator=self.generator
+                    )
                     if self.debug > 0:
                         print(f'DataLoader shuffled indices @ index {self.itnum}')
 

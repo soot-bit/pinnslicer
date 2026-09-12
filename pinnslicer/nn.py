@@ -4,6 +4,11 @@
 # Updated: Mon Oct 20, 2025: move compute_avg_loss to nn.py from pinn_copy.py
 # Updated: Thu Sep 03, 2026: Add the possibility to specified a path to the
 #                            "runs" folder in Config.
+# Updated: Sat Sep 12, 2026: code-review fixes (see summary_list_issues.pdf):
+#                            single IPython probe, evaluate_loss replaces
+#                            compute_avg_loss, module-level checkpoint I/O,
+#                            no train/eval overrides, no figure leak, and
+#                            Config no longer drops nested writes.
 # ----------------------------------------------------------------------------
 import torch
 import torch.nn as nn
@@ -15,14 +20,15 @@ import yaml
 from datetime import datetime
 
 from pinnslicer.utils.data import ensure_dir_exists
-from pinnslicer.utils.monitoring import plot_cost_curves
-# ----------------------------------------------------------------------------
-try:
-    from IPython.display import clear_output
 
-    HAS_CLEAR_OUTPUT = True
-except ImportError:
-    HAS_CLEAR_OUTPUT = False
+# The IPython capability probe lives in monitoring.py; there is one probe in
+# the package and everything imports the result from there.
+from pinnslicer.utils.monitoring import (
+    HAS_CLEAR_OUTPUT,
+    clear_output,
+    display,
+    plot_cost_curves,
+)
 # ----------------------------------------------------------------------------
 def count_trainable_parameters(model: torch.nn.Module) -> int:
     """
@@ -30,7 +36,7 @@ def count_trainable_parameters(model: torch.nn.Module) -> int:
     """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 # ----------------------------------------------------------------------------
-def compute_avg_loss(objective, loader):
+def evaluate_loss(objective, loader):
     """
     Compute the scalar cost from a single (phi, init_conds) batch.
 
@@ -44,9 +50,11 @@ def compute_avg_loss(objective, loader):
         where N is the batch size.
 
     loader : DataLoader
-        A custom DataLoader expected to yield exactly one batch. This
-        is typically enforced by setting the dataset size equal to the
-        batch size.
+        A custom DataLoader that must yield exactly one batch. This is
+        typically arranged by setting the dataset size equal to the batch
+        size. A loader yielding zero or several batches raises: the previous
+        version of this function silently returned the cost of the last
+        batch, which is not an average over batches.
 
     Returns
     -------
@@ -54,13 +62,16 @@ def compute_avg_loss(objective, loader):
         The scalar cost value, detached from the computation graph and
         moved to the CPU for logging or analysis.
     """
-    # assert len(loader) == 1, "Loader must yield exactly one batch"
+    try:
+        (phi, init_conds), = loader
+    except ValueError as error:
+        raise ValueError(
+            f"/!\\ evaluate_loss needs a loader yielding exactly one batch, "
+            f"got {len(loader)} ({error})"
+        ) from error
 
-    for phi, init_conds in loader:
-        # Detach from computation tree and send to CPU (if on a GPU)
-        avg_loss = float(objective(phi, init_conds).detach().cpu())
-
-    return avg_loss
+    # Detach from computation tree and send to CPU (if on a GPU)
+    return float(objective(phi, init_conds).detach().cpu())
 # ----------------------------------------------------------------------------
 def format_elapsed_time(now_fn, start_time: float):
     """
@@ -137,16 +148,6 @@ class FCNN(nn.Module):
         out = self.output_layer(x)
         return out
 
-    def save(self, dictfile):
-        # Save model parameters
-        torch.save(self.state_dict(), dictfile)
-
-    def load(self, dictfile, weights_only=True):
-        # Load model parameters and set to eval mode
-        self.load_state_dict(
-            torch.load(dictfile, weights_only=weights_only, map_location=torch.device("cpu"))
-        )
-        self.eval()
 # ----------------------------------------------------------------------------
 class Solution(nn.Module):
     """
@@ -173,22 +174,12 @@ class Solution(nn.Module):
         #self.register_buffer('lower_bounds', torch.Tensor(lower_bounds))
         #self.register_buffer('upper_bounds', torch.Tensor(upper_bounds))
 
-    def train(self):
-        self.g.train()
-
-    def eval(self):
-        self.g.eval()
-
-    def save(self, dictfile):
-        # Save parameters of embedded network
-        torch.save(self.g.state_dict(), dictfile)
-
-    def load(self, dictfile, weights_only=True):
-        # Load model parameters into embedded network and set to eval mode
-        self.g.load_state_dict(
-            torch.load(dictfile, weights_only=weights_only, map_location=torch.device("cpu"))
-        )
-        self.eval()
+    # Note: train(), eval(), save() and load() are deliberately NOT overridden
+    # here. nn.Module.train(mode=True) / eval() already recurse into every
+    # registered submodule, which is exactly what the old overrides tried to
+    # reimplement -- while breaking the signature (mode argument), the return
+    # value (self, needed by model.eval().to(device)) and self.training.
+    # Checkpoint I/O is the module-level save_checkpoint / load_checkpoint pair.
 
     def forward(self, phi, init_conds):
         """
@@ -243,14 +234,8 @@ class Objective(nn.Module):
         self.solution = solution
         self.return_residuals = return_residuals
 
-    def eval(self):
-        self.solution.eval()
-
-    def train(self):
-        self.solution.train()
-
-    def save(self, paramsfile):
-        self.solution.save(paramsfile)
+    # See the note in Solution: no train/eval/save overrides, the nn.Module
+    # implementations and save_checkpoint / load_checkpoint do this correctly.
 
     def forward(self, phi_vals, init_conds):
         # Assumes inputs come with shape (batch_size, D); no need to squeeze.
@@ -272,6 +257,56 @@ class Objective(nn.Module):
         residuals = d2u + u - 1.5 * u**2
 
         return residuals if self.return_residuals else torch.mean(residuals**2)
+# -------------------------------------------------------------------------
+# Checkpoint I/O
+#
+# Policy: a checkpoint file holds the state dict of the FCNN, never that of
+# the Solution or Objective wrapping it. That is what every file under runs/
+# contains, and it is what keeps checkpoints readable after a wrapper is
+# renamed or gains an attribute. These two functions are the only place that
+# knows this; pass them whichever of the three objects you have to hand.
+# -------------------------------------------------------------------------
+def get_network(model):
+    """
+    Returns the FCNN inside `model`, which may be an FCNN, a Solution or an
+    Objective.
+    """
+    if isinstance(model, Objective):
+        return model.solution.g
+    if isinstance(model, Solution):
+        return model.g
+    if isinstance(model, FCNN):
+        return model
+
+    raise TypeError(
+        f"/!\\ expected an FCNN, Solution or Objective, "
+        f"got {type(model).__name__}"
+    )
+# ----------------------------------------------------------------------------
+def save_checkpoint(model, filename):
+    """
+    Saves the state dict of the FCNN inside `model` to `filename`, creating
+    the directory if needed.
+    """
+    ensure_dir_exists(filename)
+    torch.save(get_network(model).state_dict(), filename)
+# ----------------------------------------------------------------------------
+def load_checkpoint(model, filename, weights_only=True, map_location="cpu"):
+    """
+    Loads a checkpoint into the FCNN inside `model` and switches `model` to
+    evaluation mode.
+
+    The parameters are read onto `map_location` and then copied into the
+    existing ones, so `model` stays on whatever device it was already on.
+
+    Returns:
+        model, so that the call can be chained.
+    """
+    get_network(model).load_state_dict(
+        torch.load(filename, weights_only=weights_only, map_location=map_location)
+    )
+    model.eval()
+    return model
 # -------------------------------------------------------------------------
 # Training Utilities
 # -------------------------------------------------------------------------
@@ -376,6 +411,12 @@ def train_pinn(
 
     start_time = time.time()
 
+    # One figure for the whole run, redrawn in place at each monitoring step.
+    # Creating one per step leaks them: with the committed configuration
+    # (1,000,000 iterations, monitor_step = 2000) that is 500 figures, none
+    # of them closed.
+    fig = plt.figure(figsize=(8, 6)) if display_costs else None
+
     if not model_filename:
         save_model = False
         print("Warning: Model filename not provided, model saving disabled.")
@@ -411,10 +452,10 @@ def train_pinn(
             # -----------------------
             pinn_obj.eval()
 
-            train_cost = compute_avg_loss(pinn_obj, train_valsize_loader)
+            train_cost = evaluate_loss(pinn_obj, train_valsize_loader)
             train_costs.append(train_cost)
 
-            val_cost = compute_avg_loss(pinn_obj, val_loader)
+            val_cost = evaluate_loss(pinn_obj, val_loader)
             val_costs.append(val_cost)
 
             # -----------------------
@@ -446,8 +487,8 @@ def train_pinn(
             # ---------------------------------------------------
             if save_model and model_filename:
                 if is_significant_drop_in_cost(val_cost, best_val_cost, drop_threshold):
-                    # Save FNCC model (g here)
-                    torch.save(pinn_obj.solution.g.state_dict(), model_filename)
+                    # Save FCNN model (g here)
+                    save_checkpoint(pinn_obj, model_filename)
 
             # Update best validation cost
             if best_val_cost is None or val_cost < best_val_cost:
@@ -459,14 +500,19 @@ def train_pinn(
             # Live plotting
             # -----------------------
             if display_costs:
-                if HAS_CLEAR_OUTPUT:
-                    clear_output(wait=True)
-                fig, ax = plt.subplots(figsize=(8, 6))
+                # clear the whole figure, not just the axes: plot_cost_curves
+                # adds a twin axis, which ax.clear() would leave behind.
+                fig.clf()
+                ax = fig.add_subplot(111)
                 plot_cost_curves(
                     iterations, train_costs, val_costs, best_val_costs, lrs, ax
                 )
                 fig.tight_layout()
-                plt.show()
+                if HAS_CLEAR_OUTPUT:
+                    clear_output(wait=True)
+                    display(fig)
+                else:
+                    plt.show()
 
             # -----------------------
             # Summary
@@ -498,8 +544,9 @@ def train_pinn(
     print(f"Average iteration rate: {iteration_rate:7.1f}/s")
     print(f"Total iterations:       {n_total_iterations:>10,}")
 
-    if display_costs and plot_filename:
-        fig.savefig(plot_filename)
+    if fig is not None:
+        if plot_filename:
+            fig.savefig(plot_filename)
         plt.close(fig)
 
     print("\nSaved files:")
@@ -661,7 +708,7 @@ class Config:
 
     def save(self, filename=None):
         # if no filename specified use default filename
-        if filename == None:
+        if filename is None:
             filename = self.cfg_filename
 
         # require .yaml extension
@@ -688,50 +735,63 @@ class Config:
         # this method can be used to fill out the rest
         # of the Python dictionary
         keys = key.split('/')
-        
+
         # if key exists and value !=None update the value
         # else return its value
         cfg = self.cfg
-        
+
         for ii, lkey in enumerate(keys):
             depth = ii + 1
-            
+
             if lkey in cfg:
                 # key is in dictionary
-                
+
                 val = cfg[lkey]
                 if depth < len(keys):
                     # recursion
                     cfg = val
                 else:
-                    if type(value) == type(None):
+                    # Note: `is None`, not `== None`: comparing an ndarray
+                    # with == returns an array, and `if` on it raises
+                    # "truth value of an array ... is ambiguous". Bounds are
+                    # exactly the sort of value a caller passes as an array.
+                    if value is None:
                         # key exists and no value has been specified
                         # so return existing value
                         value = val
                     else:
                         # key exists and a value has been specified
-                        # so update key and return new value
-                        cfg[key] = value # update value
+                        # so update key and return new value.
+                        # Note: cfg[lkey], not cfg[key]: at this depth cfg is
+                        # the innermost dictionary and lkey is its own key.
+                        # Writing the full slash-separated path here created a
+                        # bogus entry named 'file/params' and left the real
+                        # one untouched, while still returning the new value
+                        # to the caller.
+                        cfg[lkey] = value # update value
                     break
             else:
                 # key is not in dictionary object, so add it
-                
-                if value == None:
+
+                if value is None:
                     # no value specified, so we can't add this key
                     raise KeyError(f'key "{lkey}" not found')
-                    
+
                 elif depth < len(keys):
                     cfg[lkey] = {}
                     cfg = cfg[lkey]
                 else:
                     try:
                         cfg[lkey] = value
-                    except:
+                    except TypeError:
+                        # cfg is not a dictionary, which happens when the
+                        # parent key holds a scalar: report the type of that
+                        # value, not the type of its (always str) key.
                         pkey = keys[ii-1]
                         print(
                             f'''
-    Warning: key '{key}' not created because '{pkey}' is 
-    of type {str(type(pkey))}
+    Warning: key '{key}' not created because '{pkey}' is
+    of type {type(cfg).__name__}
                         ''')
         return value
 
