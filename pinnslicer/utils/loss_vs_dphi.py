@@ -107,31 +107,32 @@ def eval_val_losses(config, params_path, repeats=5, val_size=None, seed=0, verbo
     Returns:
         losses (list of float): one validation cost per sample.
     """
-    # torch is only needed on this path, keep the import local
-    import torch
-
-    from ..nn import FCNN, Objective, Solution, compute_avg_loss
+    from ..nn import FCNN, Objective, Solution, evaluate_loss, load_checkpoint
     from . import data as dat
 
     val_size = val_size or config["val_size"]
 
-    solution = Solution(FCNN())
-    solution.load(params_path)
+    # The architecture is read from the run config when it is recorded there
+    # (see notebook 01); older runs predate that key and used the defaults.
+    arch = config.get("arch") or {}
+
+    solution  = Solution(FCNN(**arch))
     objective = Objective(solution)
-    objective.eval()
+    load_checkpoint(objective, params_path)
 
     losses = []
     for k in range(repeats):
-        np.random.seed(seed + k)
+        # each repeat draws its own validation sample, reproducibly
         sample = dat.UniformSample(
             config["lower_bounds"],
             config["upper_bounds"],
             num_points=val_size,
+            seed=seed + k,
             verbose=0,
         )
         dataset = dat.Dataset(sample, start=0, end=val_size, verbose=0)
         loader = dat.DataLoader(dataset, batch_size=val_size, verbose=0)
-        losses.append(compute_avg_loss(objective, loader))
+        losses.append(evaluate_loss(objective, loader))
 
     if verbose:
         print(f"  {os.path.basename(params_path)}: {np.mean(losses):.3e}")
@@ -210,8 +211,16 @@ def summarise(raw, band="sem"):
     Summarises {dPhi: [losses]} in log space, where the losses are spread over
     orders of magnitude.
 
+    Final PINN losses across seeds are approximately log-normal and span
+    decades. An arithmetic mean of such a sample is dominated by its largest
+    member, and an arithmetic mean +/- standard deviation band can reach below
+    zero -- which a log axis then silently clips. Everything here is therefore
+    aggregated in log space: the centre line is the geometric mean and the
+    band is positive by construction.
+
     Parameters:
-        band (str): 'sem' (default), 'std' or 'minmax'.
+        band (str): 'sem' (default), 'std' or 'minmax'. 'sem' and 'std' use
+            the sample standard deviation (ddof=1) of the logs.
 
     Returns:
         dphis, centre, lower, upper (ndarray): the geometric mean of the
@@ -287,6 +296,7 @@ def plot_loss_vs_dphi(
     ax.set_xlabel(r"$\Delta\phi$")
     ax.set_ylabel("minimum PINN validation loss")
     ax.tick_params(which="both", direction="in", top=True, right=True)
+    ax.grid(True, which="both", linewidth=0.4, alpha=0.5)
 
     fig = ax.get_figure()
     fig.tight_layout()
