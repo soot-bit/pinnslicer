@@ -145,12 +145,10 @@ Clone the repository:
 
 ```
 
-git clone <anonymous repository URL>
+git clone https://github.com/soot-bit/pinnslicer.git
 cd pinnslicer
 
 ```
-
-(The repository URL is withheld while the paper is under double-blind review.)
 
 inside a virtual environment:
 Install the project in editable mode (installs dependencies too):
@@ -200,8 +198,8 @@ pip install -e ".[notebooks]"
   1. Assign Colab working folder to string `COLAB_FOLDER` in notebook.
   2. Execute the code below in a notebook cell before your imports (see, for example, `01_pinn_training.ipynb`).
 ```python
-COLAB_FOLDER = 'PINN'          # change as needed
-GITHUB_USER  = '<anonymous>'   # withheld for double-blind review
+COLAB_FOLDER = 'AIMS' # change as needed
+GITHUB_USER  = 'soot-bit'
 GITHUB_REPO  = 'pinnslicer'
 GITHUB_FOLDERS = ['pinnslicer']
 #------------------------------------------------------

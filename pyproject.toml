@@ -31,5 +31,5 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["pinnslicer*"]
 
-# [project.urls] omitted: the repository URL would identify the authors, and
-# the paper is under double-blind review. Restore it after the review.
+[project.urls]
+"Homepage" = "https://github.com/soot-bit/pinnslicer"
