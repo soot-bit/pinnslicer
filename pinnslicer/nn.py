@@ -4,7 +4,7 @@
 # Updated: Mon Oct 20, 2025: move compute_avg_loss to nn.py from pinn_copy.py
 # Updated: Thu Sep 03, 2026: Add the possibility to specified a path to the
 #                            "runs" folder in Config.
-# Updated: Sat Sep 12, 2026: code-review fixes (see summary_list_issues.pdf):
+# Updated: Sat Sep 12, 2026: bug fixes:
 #                            single IPython probe, evaluate_loss replaces
 #                            compute_avg_loss, module-level checkpoint I/O,
 #                            no train/eval overrides, no figure leak, and
@@ -176,9 +176,7 @@ class Solution(nn.Module):
 
     # Note: train(), eval(), save() and load() are deliberately NOT overridden
     # here. nn.Module.train(mode=True) / eval() already recurse into every
-    # registered submodule, which is exactly what the old overrides tried to
-    # reimplement -- while breaking the signature (mode argument), the return
-    # value (self, needed by model.eval().to(device)) and self.training.
+    # registered submodule.
     # Checkpoint I/O is the module-level save_checkpoint / load_checkpoint pair.
 
     def forward(self, phi, init_conds):
@@ -412,9 +410,6 @@ def train_pinn(
     start_time = time.time()
 
     # One figure for the whole run, redrawn in place at each monitoring step.
-    # Creating one per step leaks them: with the committed configuration
-    # (1,000,000 iterations, monitor_step = 2000) that is 500 figures, none
-    # of them closed.
     fig = plt.figure(figsize=(8, 6)) if display_costs else None
 
     if not model_filename:
@@ -500,8 +495,7 @@ def train_pinn(
             # Live plotting
             # -----------------------
             if display_costs:
-                # clear the whole figure, not just the axes: plot_cost_curves
-                # adds a twin axis, which ax.clear() would leave behind.
+                # clear the whole figure.
                 fig.clf()
                 ax = fig.add_subplot(111)
                 plot_cost_curves(
@@ -751,10 +745,6 @@ class Config:
                     # recursion
                     cfg = val
                 else:
-                    # Note: `is None`, not `== None`: comparing an ndarray
-                    # with == returns an array, and `if` on it raises
-                    # "truth value of an array ... is ambiguous". Bounds are
-                    # exactly the sort of value a caller passes as an array.
                     if value is None:
                         # key exists and no value has been specified
                         # so return existing value
@@ -762,12 +752,6 @@ class Config:
                     else:
                         # key exists and a value has been specified
                         # so update key and return new value.
-                        # Note: cfg[lkey], not cfg[key]: at this depth cfg is
-                        # the innermost dictionary and lkey is its own key.
-                        # Writing the full slash-separated path here created a
-                        # bogus entry named 'file/params' and left the real
-                        # one untouched, while still returning the new value
-                        # to the caller.
                         cfg[lkey] = value # update value
                     break
             else:

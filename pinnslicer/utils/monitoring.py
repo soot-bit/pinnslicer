@@ -2,8 +2,7 @@
 # Description: live monitoring of a training run.
 #
 # This module owns the single IPython capability probe used by the package:
-# import HAS_CLEAR_OUTPUT, clear_output and display from here rather than
-# probing again.
+# import HAS_CLEAR_OUTPUT, clear_output and display from here.
 # ----------------------------------------------------------------------------
 try:
     from IPython.display import clear_output, display
