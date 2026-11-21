@@ -33,8 +33,8 @@ COBALT       = '#1F5FA8'  # clean mid-blue     - deflected, u-turn
 # One line style per solver, so that FD (solid) and PINN (dotted) are told
 # apart by style and the orbit is identified by colour, in every figure.
 LINESTYLE = {
-    'fd':   dict(linestyle='-',  linewidth=1.0),
-    'pinn': dict(linestyle=':',  linewidth=1.8),
+    'fd':   dict(linestyle='-',          linewidth=1.2),
+    'pinn': dict(linestyle=(0, (3, 2)),  linewidth=2.0),   # dashes: 3 on, 2 off
 }
 
 # Cycled through when an orbit is drawn segment by segment, so that
@@ -50,10 +50,33 @@ SEGMENT_STYLES = [
 
 # The style of every figure in the paper. Applied by set_paper_style(), not on
 # import: importing a module should not silently reconfigure matplotlib.
+#
+# Figures are drawn ~11 in wide and scaled to the text width (~5.5 in) in the
+# paper, so every size below prints at about half its nominal value.
+
+# Sizes matplotlib has no rcParam for, kept here next to the style:
+FRAC_TICK_SIZE  = 16   # pi/2, 3pi/2 tick labels (\frac renders small)
+ANNOTATION_SIZE = 13   # side labels: event horizon, photon sphere, escape to infinity
+
+# Heights (axes fraction) of the side labels on the (phi, u) panel. The
+# legends are centred between them: FD/PINN between the event horizon and
+# the photon sphere, the orbit entries between the photon sphere and escape.
+U_HORIZON = 0.98
+U_SPHERE  = 2/3
+U_ESCAPE  = 0.02
+
+# Figures with many orbits (> 5) have no photon-sphere label; their orbit
+# legend is placed by hand. Tuned for the 7 boomerang orbits.
+Y_ORBITS_MANY       = 0.425
+LABELSPACING_MANY   = 0.34
+
 PAPER_STYLE = {
     'font.family':         'serif',
     'mathtext.fontset':    'stix',
-    'font.size':           11,
+    'font.size':           13,
+    'axes.labelsize':      14,
+    'xtick.labelsize':     12,
+    'ytick.labelsize':     12,
     'axes.linewidth':      0.8,
     'xtick.direction':     'in',
     'ytick.direction':     'in',
@@ -66,10 +89,11 @@ PAPER_STYLE = {
     'grid.color':          '#e0e0e0',
     'grid.linewidth':      0.5,
     'legend.frameon':      False,
-    'legend.fontsize':     11,
+    'legend.fontsize':     14,
     'legend.labelspacing': 0.8,
     'figure.dpi':          150,
     'savefig.dpi':         300,
+    'savefig.pad_inches':  0.02,   # tight crop: less white above the caption
 }
 # ══════════════════════════════════════════════════════════════
 def set_paper_style(**overrides):
@@ -172,8 +196,7 @@ class OrbitPlotUPhi:
         ax.set_xticks(major_ticks)
         ax.set_xticklabels(major_labels)
         ax.set_xticks(minor_ticks, minor=True)
-        ax.set_xticklabels(minor_labels, minor=True,
-                           fontsize=mpl.rcParams['font.size']-0.5)
+        ax.set_xticklabels(minor_labels, minor=True, fontsize=FRAC_TICK_SIZE)
         ax.yaxis.set_major_locator(mpl.ticker.MultipleLocator(0.2))
         ax.yaxis.set_minor_locator(mpl.ticker.MultipleLocator(0.1))
         ax.grid(True, which='major', linewidth=0.5)
@@ -211,7 +234,8 @@ class OrbitPlotUPhi:
                 zorder=5)
             dy = -0.04 if np.isclose(slope, 0.0, atol=1e-3) else slope*al - 0.02
             self.ax.text(al+0.02, u_[0]+dy, r'$v_0$',
-                        color=color, fontsize=11, va='center', zorder=5)
+                        color=color, fontsize=mpl.rcParams['font.size'],
+                        va='center', zorder=5)
 
     def add_orbit_segments(self, segments, color, dphi, styles=SEGMENT_STYLES):
         """Plot a PINN orbit split into its dphi-wide segments.
@@ -258,52 +282,58 @@ class OrbitPlotUPhi:
                             linestyle='-', zorder=1)
             k += 1
 
-    def finalize(self, show_labels=True, show_legend=True,
-                legend_anchor=(1.05, 0.57)):
+    def finalize(self, show_labels=True, show_legend=True, legend_x=1.05):
+        """Add the side labels and the legends, to the right of the axes.
+
+        The legends are centred vertically between the side labels (see
+        U_HORIZON, U_SPHERE, U_ESCAPE); legend_x is their left edge in axes
+        fraction.
+        """
         many_orbits = len(self._legend_handles) > 5
 
         if show_labels:
-            labels = [(0.98, 'event horizon')]
+            labels = [(U_HORIZON, 'event horizon')]
             if not many_orbits:
-                labels.append((2/3, 'photon sphere'))
-            labels.append((0.02, 'escape to infinity'))
+                labels.append((U_SPHERE, 'photon sphere'))
+            labels.append((U_ESCAPE, 'escape to infinity'))
 
             for u_val, txt in labels:
                 self.ax.annotate(txt,
                     xy=(1.0, u_val), xycoords='axes fraction',
                     xytext=(6, 0),   textcoords='offset points',
-                    va='center', ha='left',
-                    fontsize=mpl.rcParams['font.size'],
+                    va='center', ha='left', fontsize=ANNOTATION_SIZE,
                     color='#111111', annotation_clip=False)
 
-        if show_legend:
-            if self._has_pinn:
-                style_handles = [
-                    mlines.Line2D([], [], color='#666666',
-                                linestyle=LINESTYLE['fd']['linestyle'],
-                                linewidth=LINESTYLE['fd']['linewidth'],
-                                label='FD'),
-                    mlines.Line2D([], [], color='#666666',
-                                linestyle=LINESTYLE['pinn']['linestyle'],
-                                linewidth=LINESTYLE['pinn']['linewidth'],
-                                label='PINN'),
-                ]
-                leg1 = self.ax.legend(
-                    handles=style_handles,
-                    loc='upper left',
-                    bbox_to_anchor=(legend_anchor[0], 0.87),
-                    borderaxespad=0, ncol=2,
-                    fontsize=mpl.rcParams['font.size'])
-                self.ax.add_artist(leg1)
+        if not show_legend:
+            return
 
-            if self._legend_handles:
-                self.ax.legend(
-                    handles=self._legend_handles,
-                    loc='upper left',
-                    bbox_to_anchor=legend_anchor,
-                    borderaxespad=0,
-                    labelspacing=0.5 if many_orbits else mpl.rcParams['legend.labelspacing'],
-                    fontsize=mpl.rcParams['font.size'])
+        y_style  = (U_HORIZON + U_SPHERE) / 2
+        y_orbits = Y_ORBITS_MANY if many_orbits else (U_SPHERE + U_ESCAPE) / 2
+
+        if self._has_pinn:
+            style_handles = [
+                mlines.Line2D([], [], color='#666666', label=label,
+                              **LINESTYLE[key])
+                for key, label in (('fd', 'FD'), ('pinn', 'PINN'))
+            ]
+            # short swatches keep this legend no wider than the orbit
+            # legend, so the tight crop never clips it
+            leg1 = self.ax.legend(
+                handles=style_handles,
+                loc='center left',
+                bbox_to_anchor=(legend_x, y_style),
+                borderaxespad=0, ncol=2,
+                handlelength=1.5, columnspacing=1.0)
+            self.ax.add_artist(leg1)
+
+        if self._legend_handles:
+            self.ax.legend(
+                handles=self._legend_handles,
+                loc='center left',
+                bbox_to_anchor=(legend_x, y_orbits),
+                borderaxespad=0,
+                labelspacing=(LABELSPACING_MANY if many_orbits
+                              else mpl.rcParams['legend.labelspacing']))
 # ══════════════════════════════════════════════════════════════
 def split_phi_u_segments(phi, u, dphi):
     """Split (phi, u) into dphi-wide segments.
@@ -328,7 +358,6 @@ def split_phi_u_segments(phi, u, dphi):
 def plot_xy_uphi(orbits, phi_max, fd_data, pinn_data=None,
                  name='', save=False, savedir='figures',
                  show_v0=False, show_labels=True,
-                 legend_anchor=(1.05, 0.57),
                  xlim=(-3, 8), ylim=(-4, 4), total_width=11.0):
     """Build photon-orbit figure: Cartesian (x, y) and (phi, u).
 
@@ -352,8 +381,6 @@ def plot_xy_uphi(orbits, phi_max, fd_data, pinn_data=None,
         Draw initial-velocity arrows on the (phi, u) panel.
     show_labels : bool
         Annotate event horizon, photon sphere, and escape on the right margin.
-    legend_anchor : tuple of float
-        Legend position in axes fraction.
     xlim, ylim : tuple of float
         Cartesian panel limits.
     total_width : float
@@ -402,8 +429,7 @@ def plot_xy_uphi(orbits, phi_max, fd_data, pinn_data=None,
                                 r0=orb['r0'], delta=orb['delta'],
                                 style='pinn')
 
-    plot_uphi.finalize(show_labels=show_labels, show_legend=True,
-                       legend_anchor=legend_anchor)
+    plot_uphi.finalize(show_labels=show_labels, show_legend=True)
 
     if save:
         save_figure(fig, name, savedir=savedir)
@@ -461,8 +487,7 @@ def plot_uphi_with_segment_panels(orbits_main, orbits_panels, dphi, phi_max,
         handles=plot_main._legend_handles,
         loc='center left',
         bbox_to_anchor=legend_anchor,
-        borderaxespad=0,
-        fontsize=mpl.rcParams['font.size'])
+        borderaxespad=0)
 
     # narrow panels: one orbit each, segments overlaid on [0, dphi]
     for i, (ax_i, orb) in enumerate(zip(ax_panels, orbits_panels)):
