@@ -12,6 +12,7 @@
 #   plot_xy_uphi()                 — the paired (x, y) / (phi, u) figure
 #   plot_uphi_with_segment_panels()— (phi, u) plus per-orbit segment panels
 #   split_phi_u_segments()         — chop an orbit into dphi-wide segments
+#   plot_rmse_vs_ic()              — RMSE_u vs FD over a grid of initial conditions
 #
 # The two solvers return OrbitSolution objects (see orbits/solvers.py); the
 # figure builders here take dictionaries of those, keyed by (r0, delta).
@@ -33,7 +34,7 @@ COBALT       = '#1F5FA8'  # clean mid-blue     - deflected, u-turn
 # One line style per solver, so that FD (solid) and PINN (dotted) are told
 # apart by style and the orbit is identified by colour, in every figure.
 LINESTYLE = {
-    'fd':   dict(linestyle='-',          linewidth=1.2),
+    'fd':   dict(linestyle='-',          linewidth=0.8),
     'pinn': dict(linestyle=(0, (3, 2)),  linewidth=2.0),   # dashes: 3 on, 2 off
 }
 
@@ -316,14 +317,11 @@ class OrbitPlotUPhi:
                               **LINESTYLE[key])
                 for key, label in (('fd', 'FD'), ('pinn', 'PINN'))
             ]
-            # short swatches keep this legend no wider than the orbit
-            # legend, so the tight crop never clips it
             leg1 = self.ax.legend(
                 handles=style_handles,
                 loc='center left',
                 bbox_to_anchor=(legend_x, y_style),
-                borderaxespad=0, ncol=2,
-                handlelength=1.5, columnspacing=1.0)
+                borderaxespad=0, ncol=2)
             self.ax.add_artist(leg1)
 
         if self._legend_handles:
@@ -503,3 +501,36 @@ def plot_uphi_with_segment_panels(orbits_main, orbits_panels, dphi, phi_max,
         save_figure(fig, name, savedir=savedir)
 
     return fig
+# ══════════════════════════════════════════════════════════════
+def plot_rmse_vs_ic(rmse_grid, u0_grid, v0_grid, panels, phi_max,
+                    name='rmse_vs_ic', save=False, savedir='figures'):
+    """log10 RMSE_u of PINN-Slicer vs FD over the (u0, v0) grid, each
+    panel uses a PINN trained and deployed on the slice Δφ.
+
+    Blank cells: orbits with too few points in common with FD (photons absorbed
+    within a small angle φ).
+    """
+    def panel_title(dphi):
+        return ('no slicing' if np.isclose(dphi, phi_max)
+                else rf'$\Delta\phi = {dphi:g}$')
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(4*len(panels), 3.6),
+                             layout='constrained')
+    fig.get_layout_engine().set(wspace=0.018)    # default 0.02: panels 10% closer
+
+    for ax, dphi in zip(np.atleast_1d(axes), panels):
+        im = ax.pcolormesh(u0_grid, v0_grid,
+                           np.log10(np.clip(rmse_grid[dphi], 1e-8, None)).T,
+                           vmin=-6, vmax=0, cmap='viridis', shading='nearest')
+        # the photon-sphere orbit, (u0, v0) = (2/3, 0): a gold cross drawn
+        # over a slightly larger black one, so it stays visible on yellow
+        ax.plot(2/3, 0, marker='+', ms=12, mew=4, color='k')
+        ax.plot(2/3, 0, marker='+', ms=10, mew=2, color=GOLDENROD)
+        ax.set_title(panel_title(dphi))
+        ax.set_xlabel('$u_0$')
+        ax.set_ylabel('$v_0$', labelpad=1)        # default 4: label nearer its axis
+
+    fig.colorbar(im, ax=axes, pad=0.015, label=r'$\log_{10}$ RMSE$_u$ vs FD')
+
+    if save:
+        save_figure(fig, name, savedir=savedir)
